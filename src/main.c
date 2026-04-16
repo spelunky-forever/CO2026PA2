@@ -106,29 +106,55 @@ void fft(float *__restrict real, float *__restrict imag, size_t n) {
 /* RVV hint: vlse32 with stride=8 bytes extracts all re (or im) values in one pass. */
 void power_spectrum(const float *__restrict stft_data, size_t num_frames,
                     float *__restrict output) {
-    size_t total_bins = num_frames * N_FREQ_BINS; 
-    size_t i = 0;
+    size_t n = num_frames * N_FREQ_BINS; 
+    const float *in = stft_data;
+    float *out = output;
+    ptrdiff_t stride = 8; // 2 * sizeof(float)
     
-    // 跨距不變
-    ptrdiff_t stride = 2 * sizeof(float);
+    // 取得 m8 所能支援的最大向量長度
+    size_t vlmax = __riscv_vsetvlmax_e32m8();
     
-    while (total_bins > 0) {
-        // 🚀 優化 1：將 LMUL 開到最大 (m8)，榨乾 32 個向量暫存器
-        size_t vl = __riscv_vsetvl_e32m8(total_bins);
+    // 終極優化：LMUL=8 搭配雙路展開 (Unroll by 2)，精準使用 32 個向量暫存器
+    while (n >= 2 * vlmax) {
+        // 1. 載入實部並立即平方，這樣做能讓編譯器有最佳的暫存器分配
+        vfloat32m8_t r1 = __riscv_vlse32_v_f32m8(in, stride, vlmax);
+        vfloat32m8_t r2 = __riscv_vlse32_v_f32m8(in + 2 * vlmax, stride, vlmax);
         
-        vfloat32m8_t v_re = __riscv_vlse32_v_f32m8(&stft_data[i * 2], stride, vl);
-        vfloat32m8_t v_im = __riscv_vlse32_v_f32m8(&stft_data[i * 2 + 1], stride, vl);
+        r1 = __riscv_vfmul_vv_f32m8(r1, r1, vlmax);
+        r2 = __riscv_vfmul_vv_f32m8(r2, r2, vlmax);
         
-        // 🚀 優化 2：使用 FMA (融合乘加運算)
-        // 1. 先算 power = re * re
-        vfloat32m8_t v_power = __riscv_vfmul_vv_f32m8(v_re, v_re, vl);
-        // 2. 再算 power = power + (im * im) -> 使用 vfmacc！
-        v_power = __riscv_vfmacc_vv_f32m8(v_power, v_im, v_im, vl);
+        // 2. 在硬體算乘法時，利用記憶體空窗期去載入虛部
+        vfloat32m8_t i1 = __riscv_vlse32_v_f32m8(in + 1, stride, vlmax);
+        vfloat32m8_t i2 = __riscv_vlse32_v_f32m8(in + 2 * vlmax + 1, stride, vlmax);
         
-        __riscv_vse32_v_f32m8(&output[i], v_power, vl);
+        // 3. 融合乘加計算功率 (r = r + i * i)
+        r1 = __riscv_vfmacc_vv_f32m8(r1, i1, i1, vlmax);
+        r2 = __riscv_vfmacc_vv_f32m8(r2, i2, i2, vlmax);
         
-        total_bins -= vl;
-        i += vl;
+        // 4. 寫回結果
+        __riscv_vse32_v_f32m8(out, r1, vlmax);
+        __riscv_vse32_v_f32m8(out + vlmax, r2, vlmax);
+        
+        in += 4 * vlmax;
+        out += 2 * vlmax;
+        n -= 2 * vlmax;
+    }
+    
+    // 處理尾巴剩下的資料
+    while (n > 0) {
+        size_t vl = __riscv_vsetvl_e32m8(n);
+        
+        vfloat32m8_t r = __riscv_vlse32_v_f32m8(in, stride, vl);
+        r = __riscv_vfmul_vv_f32m8(r, r, vl);
+        
+        vfloat32m8_t i = __riscv_vlse32_v_f32m8(in + 1, stride, vl);
+        r = __riscv_vfmacc_vv_f32m8(r, i, i, vl);
+        
+        __riscv_vse32_v_f32m8(out, r, vl);
+        
+        in += 2 * vl;
+        out += vl;
+        n -= vl;
     }
 }
 
