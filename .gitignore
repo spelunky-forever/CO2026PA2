@@ -1,0 +1,15 @@
+# 忽略本機 Python 環境設定
+.python-version
+
+# 忽略參考資料與編譯出來的龐大文件
+reference/librosa/
+
+# 忽略程式執行過程產生的編譯檔 (C 語言常見)
+*.o
+*.out
+*.exe
+
+# 忽略 Python 常見的暫存檔
+__pycache__/
+*.pyc
+.DS_Store
